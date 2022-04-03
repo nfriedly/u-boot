@@ -29,6 +29,9 @@
 #include "../anx9804.h"
 #include "../hitachi_tx18d42vm_lcd.h"
 #include "../ssd2828.h"
+//#include "miyoo_1.h"
+#include "miyoo_2.h"
+//#include "miyoo_3.h"
 #include "simplefb_common.h"
 
 #ifdef CONFIG_VIDEO_LCD_BL_PWM_ACTIVE_LOW
@@ -39,6 +42,7 @@
 #define PWM_OFF 0
 #endif
 
+static int miyoo_ver=1;
 DECLARE_GLOBAL_DATA_PTR;
 
 enum sunxi_monitor {
@@ -67,6 +71,498 @@ const struct ctfb_res_modes composite_video_modes[2] = {
 	{ 720,  576, 50, 37037,  27000, 137,   5, 20, 27,   2, 2, 0, FB_VMODE_INTERLACED },
 	{ 720,  480, 60, 37037,  27000, 116,  20, 16, 27,   2, 2, 0, FB_VMODE_INTERLACED },
 };
+
+static void sunxi_lcdc_output(uint32_t is_data, uint32_t val)
+{
+  uint32_t ret;
+	struct sunxi_gpio_reg * const gpio = (struct sunxi_gpio_reg *)SUNXI_PIO_BASE;
+
+  ret = (val & 0x00ff) << 1;
+  ret|= (val & 0xff00) << 2;
+  ret|= is_data ? 0x80000 : 0;
+  ret|= 0x100000;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_D].dat);
+  ret|= 0x40000;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_D].dat);
+}
+
+static uint32_t sunxi_lcdc_input(void)
+{
+  uint32_t ret, val;
+	struct sunxi_gpio_reg * const gpio = (struct sunxi_gpio_reg *)SUNXI_PIO_BASE;
+  
+  ret = 0x80000;
+  ret|= 0x40000;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_D].dat);
+  mdelay(1);
+  
+  writel(0x00000007, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[0]); // 0x11111117
+  writel(0x00000070, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[1]); // 0x11111171
+  
+  val = readl(&gpio->gpio_bank[SUNXI_GPIO_D].dat);
+  ret|= 0x100000;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_D].dat);
+  
+  writel(0x11111117, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[0]); // 0x11111117
+  writel(0x11111171, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[1]); // 0x11111171
+  return val & 0xffff;
+}
+
+void lcd_wr_cmd(uint32_t val)
+{
+  sunxi_lcdc_output(0, val);
+}
+
+void lcd_wr_dat(uint32_t val)
+{
+  sunxi_lcdc_output(1, val);
+}
+
+uint32_t lcd_rd_dat(void)
+{
+  return sunxi_lcdc_input();
+}
+
+static void sunxi_lcdc_gpio_config(void)
+{
+	struct sunxi_gpio_reg * const gpio = (struct sunxi_gpio_reg *)SUNXI_PIO_BASE;
+  
+  writel(0x11111117, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[0]); // 0x11111117
+  writel(0x11111171, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[1]); // 0x11111171
+  writel(0x00111111, &gpio->gpio_bank[SUNXI_GPIO_D].cfg[2]); // 0x00111111, CS/RD/RS/WR
+  writel(0xffffffff, &gpio->gpio_bank[SUNXI_GPIO_D].dat);
+  
+  uint32_t ret=0;
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].cfg[0]);
+  ret&= 0xffffff0f;
+  ret|= 0x00000010;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].cfg[0]);
+ 
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  ret&= 0xfffffffd;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  mdelay(100);
+  ret|= 0x00000002;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].dat);
+}
+
+static void lcd_init(void)
+{
+  uint32_t ret, x;
+  uint16_t ver[4];
+	struct sunxi_gpio_reg * const gpio = (struct sunxi_gpio_reg *)SUNXI_PIO_BASE;
+
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].cfg[0]);
+  ret&= 0xf0ffffff;
+  ret|= 0xf1ffffff;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].cfg[0]);
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  ret|= 0x0040;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].dat);
+
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].cfg[1]);
+  ret&= 0xffff0fff;
+  ret|= 0xffff1fff;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].cfg[1]);
+  ret = readl(&gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  ret&= ~0x0800;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  mdelay(250);
+  ret|= 0x0800;
+  writel(ret, &gpio->gpio_bank[SUNXI_GPIO_E].dat);
+  mdelay(150);
+  
+  lcd_wr_cmd(0x04);
+  for(x=0; x<4; x++){
+    ver[x] = lcd_rd_dat();
+  }
+  if(ver[2]){
+    miyoo_ver = 2; 
+  }
+  else{
+    lcd_wr_cmd(0x00);
+    for(x=0; x<4; x++){
+      ver[x] = lcd_rd_dat();
+    }    
+    miyoo_ver = 3; 
+    if(ver[2] == 0){
+      miyoo_ver = 1; 
+    }    
+  }
+
+  switch(miyoo_ver){
+	case 1:
+    lcd_wr_cmd(0xb0);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xb1);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xb3);
+    lcd_wr_dat(0x02);
+    lcd_wr_dat(0x00); //te, every frame
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xb4);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xc0);
+    lcd_wr_dat(0x07);
+    lcd_wr_dat(0x4f); //320 lines
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x01);
+    lcd_wr_dat(0x33);
+
+    lcd_wr_cmd(0xc1);
+    lcd_wr_dat(0x01); // 0x01
+    lcd_wr_dat(0x01); // 0x00
+    lcd_wr_dat(0x11);
+    lcd_wr_dat(0x08); // bp0:0x08
+    lcd_wr_dat(0x08); // fp0:0x08
+
+    lcd_wr_cmd(0xc3);
+    lcd_wr_dat(0x01); // 0x01
+    lcd_wr_dat(0x01); // 0x00
+    lcd_wr_dat(0x11);
+    lcd_wr_dat(0x08); // bp2:0x08
+    lcd_wr_dat(0x08); // fp2:0x08
+
+    lcd_wr_cmd(0xc4);
+    lcd_wr_dat(0x11);
+    lcd_wr_dat(0x01);
+    lcd_wr_dat(0x43);
+    lcd_wr_dat(0x01);
+
+    lcd_wr_cmd(0xc8);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x8a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x23);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x60);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xc9);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x8a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x23);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x88);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x23);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xca);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x8a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x23);
+    lcd_wr_dat(0x10);
+    lcd_wr_dat(0x05);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x88);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x0a);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x23);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xd0);
+    lcd_wr_dat(0x07);
+    lcd_wr_dat(0xc6);
+    lcd_wr_dat(0xdc);
+
+    lcd_wr_cmd(0xd1);
+    lcd_wr_dat(0x54);
+    lcd_wr_dat(0x0d);
+    lcd_wr_dat(0x02);
+
+    lcd_wr_cmd(0xd2);
+    lcd_wr_dat(0x63);
+    lcd_wr_dat(0x24);
+
+    lcd_wr_cmd(0xd4);
+    lcd_wr_dat(0x63);
+    lcd_wr_dat(0x24);
+
+    lcd_wr_cmd(0xd8);
+    lcd_wr_dat(0x07);
+    lcd_wr_dat(0x07);
+
+    lcd_wr_cmd(0xe0);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0x13);
+
+    lcd_wr_cmd(0x20);
+
+    lcd_wr_cmd(0x35); //tear on
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0x44); //tear signal
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x30); //0x30
+
+    lcd_wr_cmd(0x36);
+    lcd_wr_dat(0xe0);
+
+    lcd_wr_cmd(0x3a);
+    lcd_wr_dat(0x55);
+
+    lcd_wr_cmd(0x2a); //y:320
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x01);
+    lcd_wr_dat(0x40-1);
+
+    lcd_wr_cmd(0x2b); //x:240
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0xf0-1);
+
+    mdelay(150);
+    lcd_wr_cmd(0x11);
+    mdelay(150);
+    lcd_wr_cmd(0x29);
+    mdelay(150);
+    lcd_wr_cmd(0x2c);
+	  break;
+	case 2:
+    lcd_wr_cmd(0x11);
+    mdelay(250);
+                  
+    lcd_wr_cmd(0x36);
+    lcd_wr_dat(0x70);
+                          
+    lcd_wr_cmd(0x3a);
+    lcd_wr_dat(0x05);
+      
+    lcd_wr_cmd(0x2a);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x01);
+    lcd_wr_dat(0x3f);
+
+    lcd_wr_cmd(0x2b);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0xef);
+        
+    lcd_wr_cmd(0xb2);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x00);        			
+    lcd_wr_dat(0x33);
+    lcd_wr_dat(0x33);
+      
+    lcd_wr_cmd(0xb7);
+    lcd_wr_dat(0x35);
+
+    lcd_wr_cmd(0xb8);
+    lcd_wr_dat(0x2f);
+    lcd_wr_dat(0x2b);
+    lcd_wr_dat(0x2f);
+          
+    lcd_wr_cmd(0xbb);
+    lcd_wr_dat(0x15);
+          
+    lcd_wr_cmd(0xc0);
+    lcd_wr_dat(0x3C);
+        
+    lcd_wr_cmd(0xc2);
+    lcd_wr_dat(0x01);							
+
+    lcd_wr_cmd(0xc3);
+    lcd_wr_dat(0x13);
+
+    lcd_wr_cmd(0xc4);
+    lcd_wr_dat(0x20);
+
+    lcd_wr_cmd(0xc6);
+    lcd_wr_dat(0x04);
+
+    lcd_wr_cmd(0xd0);
+    lcd_wr_dat(0xa4);
+    lcd_wr_dat(0xa1);
+        
+    lcd_wr_cmd(0xe8);
+    lcd_wr_dat(0x03);
+
+    lcd_wr_cmd(0xe9);
+    lcd_wr_dat(0x0d);
+    lcd_wr_dat(0x12);
+    lcd_wr_dat(0x00);
+
+    lcd_wr_cmd(0xe0);
+    lcd_wr_dat(0x70);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x06);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x0b);
+    lcd_wr_dat(0x2a);
+    lcd_wr_dat(0x3c);
+    lcd_wr_dat(0x33);
+    lcd_wr_dat(0x4b);
+    lcd_wr_dat(0x08);
+    lcd_wr_dat(0x16);
+    lcd_wr_dat(0x14);
+    lcd_wr_dat(0x2a);
+    lcd_wr_dat(0x23);
+        
+    lcd_wr_cmd(0xe1);
+    lcd_wr_dat(0xd0);
+    lcd_wr_dat(0x00);
+    lcd_wr_dat(0x06);
+    lcd_wr_dat(0x09);
+    lcd_wr_dat(0x0b);
+    lcd_wr_dat(0x29);
+    lcd_wr_dat(0x36);
+    lcd_wr_dat(0x54);
+    lcd_wr_dat(0x4b);
+    lcd_wr_dat(0x0d);
+    lcd_wr_dat(0x16);
+    lcd_wr_dat(0x14);
+    lcd_wr_dat(0x28);
+    lcd_wr_dat(0x22);
+
+    mdelay(50);
+    lcd_wr_cmd(0x29);
+    mdelay(50);
+    lcd_wr_cmd(0x2c);
+    mdelay(100);
+		break;
+  case 3:
+    lcd_wr_cmd(0xa4);
+    lcd_wr_dat(0x0001);
+    mdelay(50);
+    lcd_wr_cmd(0x9c);
+    lcd_wr_dat(0x0033); // pcdiv
+    lcd_wr_cmd(0x60);
+    lcd_wr_dat(0x2700); // 320 lines
+    lcd_wr_cmd(0x08);
+    lcd_wr_dat(0x0808); // fp, bp
+    lcd_wr_cmd(0x30);
+    lcd_wr_dat(0x0103); // gamma
+    lcd_wr_cmd(0x31);
+    lcd_wr_dat(0x1811);
+    lcd_wr_cmd(0x32);
+    lcd_wr_dat(0x0501);
+    lcd_wr_cmd(0x33);
+    lcd_wr_dat(0x0510);
+    lcd_wr_cmd(0x34);
+    lcd_wr_dat(0x2010);
+    lcd_wr_cmd(0x35);
+    lcd_wr_dat(0x1005);
+    lcd_wr_cmd(0x36);
+    lcd_wr_dat(0x1105);
+    lcd_wr_cmd(0x37);
+    lcd_wr_dat(0x1108);
+    lcd_wr_cmd(0x38);
+    lcd_wr_dat(0x0301);
+    lcd_wr_cmd(0x39);
+    lcd_wr_dat(0x1020);
+    lcd_wr_cmd(0x90);
+    lcd_wr_dat(0x001f); // 80hz, 0x0016
+    lcd_wr_cmd(0x10);
+    lcd_wr_dat(0x0530); // bt, ap
+    lcd_wr_cmd(0x11);
+    lcd_wr_dat(0x0247); // dc1, dc0, vc
+    lcd_wr_cmd(0x12);
+    lcd_wr_dat(0x01bc);
+    lcd_wr_cmd(0x13);
+    lcd_wr_dat(0x1000);
+    mdelay(50);
+    lcd_wr_cmd(0x01);
+    lcd_wr_dat(0x0100);
+    lcd_wr_cmd(0x02);
+    lcd_wr_dat(0x0200);
+    lcd_wr_cmd(0x03);
+    lcd_wr_dat(0x1028); // 0x1028
+    lcd_wr_cmd(0x09);
+    lcd_wr_dat(0x0001);
+    lcd_wr_cmd(0x0a);
+    lcd_wr_dat(0x0008); // one frame
+    lcd_wr_cmd(0x0c);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x0d);
+    lcd_wr_dat(0xd000); // frame mark 0xd000
+    lcd_wr_cmd(0x0e);
+    lcd_wr_dat(0x0030);
+    lcd_wr_cmd(0x0f);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x20);
+    lcd_wr_dat(0x0000); // H Start
+    lcd_wr_cmd(0x21);
+    lcd_wr_dat(0x0000); // V Start
+    lcd_wr_cmd(0x29);
+    lcd_wr_dat(0x002e);
+    lcd_wr_cmd(0x50);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x51);
+    lcd_wr_dat(0xd0ef);
+    lcd_wr_cmd(0x52);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x53);
+    lcd_wr_dat(0x013f);
+    lcd_wr_cmd(0x61);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x6a);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x80);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x81);
+    lcd_wr_dat(0x0000);
+    lcd_wr_cmd(0x82);
+    lcd_wr_dat(0x005f);
+    lcd_wr_cmd(0x93);
+    lcd_wr_dat(0x0507);
+    lcd_wr_cmd(0x07);
+    lcd_wr_dat(0x0100);
+    mdelay(150);
+    lcd_wr_cmd(0x22);
+    mdelay(150);
+    break;
+  }
+}
 
 #ifdef CONFIG_VIDEO_HDMI
 
@@ -1130,7 +1626,8 @@ void *video_hw_init(void)
 
 	switch (sunxi_display.monitor) {
 	case sunxi_monitor_none:
-		return NULL;
+    break;
+		//return NULL;
 	case sunxi_monitor_dvi:
 	case sunxi_monitor_hdmi:
 		if (!sunxi_has_hdmi()) {
@@ -1226,6 +1723,28 @@ void *video_hw_init(void)
 	graphic_device->winSizeY = mode->yres - 2 * overscan_y;
 	graphic_device->plnSizeX = mode->xres * graphic_device->gdfBytesPP;
 
+  sunxi_lcdc_gpio_config();
+  lcd_init();
+
+  uint16_t bug=3;
+  while(bug--){
+    extern uint8_t miyoo[];
+    uint16_t x, y;
+    uint32_t cnt=0;
+    uint16_t *p = (uint16_t*)miyoo;
+
+		if(miyoo_ver <= 2){
+    	lcd_wr_cmd(0x2c);
+		}
+    for(y=0; y<240; y++){
+      for(x=0; x<320; x++){
+        lcd_wr_dat(p[cnt++]);
+      }
+    }
+  }
+  if(miyoo_ver <= 2){
+    lcd_wr_cmd(0x2c);
+  }
 	return graphic_device;
 }
 
